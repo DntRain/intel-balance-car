@@ -24,10 +24,11 @@
 #define PIN_IN4     6
 #define PIN_PWMA    10   // 左电机 PWM
 #define PIN_PWMB    9    // 右电机 PWM
-#define PIN_ENC_L_A 2    // INT0
-#define PIN_ENC_L_B 5
-#define PIN_ENC_R_A 4    // PCINT20
-#define PIN_ENC_R_B 8
+// ⚠️ 左右归属与文档初版相反：2026-07-10 单轮手转实测，D2 编码器在右轮、D4 在左轮
+#define PIN_ENC_R_A 2    // INT0
+#define PIN_ENC_R_B 5
+#define PIN_ENC_L_A 4    // PCINT20
+#define PIN_ENC_L_B 8
 #define PIN_VBAT    A0
 
 // ================= 里程计常量（权威定义：docs/serial-protocol.md） =================
@@ -96,14 +97,14 @@ volatile uint8_t telemetry_due = 0;     // 控制 ISR 置位，loop 发送
 
 // ================= 编码器中断 =================
 // 2 倍频：A 相 CHANGE 触发，A^B 判向。直读端口寄存器（ISR 内避免 digitalRead 开销）
-void readEncoderL() {
+// 两路符号均为 2026-07-10 单轮手转实测校准：前进方向计数为正
+void readEncoderR() {  // D2/INT0 = 右轮
   bool a = PIND & _BV(PD2), b = PIND & _BV(PD5);
-  if (a ^ b) { Velocity_L++; Odom_L++; } else { Velocity_L--; Odom_L--; }
-}
-ISR(PCINT2_vect) {  // D4 = PCINT20（PCMSK2 只使能该位）
-  bool a = PIND & _BV(PD4), b = PINB & _BV(PB0);   // D8 = PB0
-  // 右电机镜像安装，计数取反使前进方向两轮同号 ⚠️ 装车后验证
   if (a ^ b) { Velocity_R--; Odom_R--; } else { Velocity_R++; Odom_R++; }
+}
+ISR(PCINT2_vect) {  // D4 = PCINT20（PCMSK2 只使能该位）= 左轮
+  bool a = PIND & _BV(PD4), b = PINB & _BV(PB0);   // D8 = PB0
+  if (a ^ b) { Velocity_L--; Odom_L--; } else { Velocity_L++; Odom_L++; }
 }
 
 // ================= MPU6050（Wire 直读，无库依赖） =================
@@ -342,7 +343,7 @@ void setup() {
   Wire.setClock(400000L);  // 无 I2C 从机，可用 400kHz（基线因 ESP32 从机限 100k）
   mpuInit();
 
-  attachInterrupt(digitalPinToInterrupt(PIN_ENC_L_A), readEncoderL, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_ENC_R_A), readEncoderR, CHANGE);
   PCICR  |= _BV(PCIE2);     // 使能端口 D 的 PCINT 组
   PCMSK2 |= _BV(PCINT20);   // 仅 D4
 
