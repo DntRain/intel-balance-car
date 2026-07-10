@@ -41,8 +41,9 @@
 | `WHEEL_DIAMETER_MM` | 67.0 ⚠️待实测 | 轮径 |
 | `WHEEL_TRACK_MM` | 170.0 ⚠️待实测 | 两轮中心距 |
 | `ENCODER_PPR` | 11 | 编码器线数（电机轴） |
+| `DECODE_MULT` | 2 | A 相 CHANGE 触发 = 2 倍频（套件 B 相无中断脚，做不了 4 倍频） |
 | `GEAR_RATIO` | 30 ⚠️按电机型号确认 | 减速比 |
-| `COUNTS_PER_WHEEL_REV` | 11 × 4 × 30 = 1320 | 4 倍频后每轮转一圈计数 |
+| `COUNTS_PER_WHEEL_REV` | 11 × 2 × 30 = 660 | 每轮转一圈的计数 |
 
 换算：`轮位移(mm) = 编码器增量 / COUNTS_PER_WHEEL_REV × π × WHEEL_DIAMETER_MM`
 
@@ -54,3 +55,10 @@ v = (v_R + v_L) / 2          v_L = v − ω·L/2
 
 > 本表为唯一权威定义。固件 `firmware/balance-car/src/` 与 ROS2 驱动
 > `ros2_ws/src/balance_chassis_driver/` 中的常量必须与此保持一致，改动需同步三处。
+
+## 与朋友项目协议的关系
+
+[lxbme/arduino-balance-car](https://github.com/lxbme/arduino-balance-car) 走的是
+I2C（UNO 主机 → ESP32 从机 0x55，30 字节包含累计编码器+IMU+卡尔曼角度，50ms 周期）。
+本协议按任务书「串口上报」要求改为 UART，但沿用其思路：0xAA 帧头、求和校验、50Hz 周期。
+差异：本协议编码器传**增量**而非累计值（避免 int32 溢出与丢帧累积误差），并增加下行 cmd_vel。

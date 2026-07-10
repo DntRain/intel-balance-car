@@ -2,6 +2,10 @@
 
 阶段 6 实现。Fusion 源文件（.f3d）与打印用 STL/3MF 放本目录。
 
+工具链（老师推荐，二选一，详见 docs/references.md）：
+- **cad-modeling-fusion-skill**：自然语言→CAD 脚本，装入 Claude Code 的 claude-skills/
+- **openclaw-fusion**：AuraFriday MCP-Link + Fusion MCP Add-in 直控 Fusion，截图闭环验证
+
 ## 固定件清单（任务书要求）
 
 | 零件 | 安装对象 | 设计要点 |
