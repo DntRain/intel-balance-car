@@ -1,0 +1,29 @@
+# PlatformIO
+firmware/**/.pio/
+firmware/**/.vscode/
+
+# ROS2 / colcon（工作空间构建产物，仅 src/ 入库）
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# ESP-IDF
+esp32/**/build/
+esp32/**/sdkconfig.old
+esp32/**/managed_components/
+
+# Python
+__pycache__/
+*.pyc
+
+# Fusion 360 / 3D 打印切片临时文件
+mechanical/**/*.bak
+mechanical/**/~$*
+*.f3d.lck
+
+# 立创EDA 备份
+pcb/**/*backup*
+
+# 系统
+.DS_Store
+Thumbs.db
