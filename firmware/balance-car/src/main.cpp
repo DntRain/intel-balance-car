@@ -1,58 +1,377 @@
-// 平衡小车固件骨架 —— 阶段 1 实现
-// 引脚映射与调参初值取自同款小车的实测项目 lxbme/arduino-balance-car（见 docs/references.md）
-// 引脚表见 docs/hardware.md；串口协议见 docs/serial-protocol.md
+/****************************************************************************
+  平衡小车固件 —— 阶段 1
+  基线：lxbme/arduino-balance-car（MiniBalance 同款套件实测版本）
+  改造（见 docs/roadmap.md 阶段 1）：
+    1. 启用右编码器（D4 原生 PCINT，不用 PinChangeInt 库）
+    2. 实现转向环（基线的 turn() 是空函数）
+    3. I2C→ESP32 改为 UART→RDK X5，按 docs/serial-protocol.md v1.0
+    4. 接收下行 cmd_vel 帧，500ms 超时自动清零
+  MPU6050 直接用 Wire 读寄存器（不依赖 I2Cdev/MPU6050 大库）。
+****************************************************************************/
 #include <Arduino.h>
+#include <Wire.h>
+#include <MsTimer2.h>
+#include <KalmanFilter.h>
 
-// ---- 引脚定义（MiniBalance 套件固定接线，勿改）----
-constexpr uint8_t PIN_ENC_L_A  = 2;   // INT0，CHANGE 触发
-constexpr uint8_t PIN_ENC_L_B  = 5;   // 方向判读
-constexpr uint8_t PIN_ENC_R_A  = 4;   // ⚠️ 需 PCINT（PinChangeInt），朋友项目未启用
-constexpr uint8_t PIN_ENC_R_B  = 8;
-constexpr uint8_t PIN_KEY      = 3;   // 启停按键
-constexpr uint8_t PIN_IN1      = 12;  // 左电机方向
-constexpr uint8_t PIN_IN2      = 13;
-constexpr uint8_t PIN_IN3      = 7;   // 右电机方向
-constexpr uint8_t PIN_IN4      = 6;
-constexpr uint8_t PIN_PWMA     = 10;  // 左电机 PWM
-constexpr uint8_t PIN_PWMB     = 9;   // 右电机 PWM
-constexpr uint8_t PIN_VBAT     = A0;
+// 置 1 时输出人类可读调试信息、关闭二进制遥测（两者共用串口，不能同时开）
+#define DEBUG_PRINT 0
 
-// ---- 里程计常量（唯一权威定义在 docs/serial-protocol.md，改动需同步）----
-constexpr float    WHEEL_DIAMETER_MM    = 67.0f;  // ⚠️ 待实测
-constexpr float    WHEEL_TRACK_MM       = 170.0f; // ⚠️ 待实测
-constexpr uint16_t COUNTS_PER_WHEEL_REV = 660;    // 11 线 × 2 倍频 × 减速比 30
+// ================= 引脚（MiniBalance 套件固定接线） =================
+#define PIN_KEY     3
+#define PIN_IN1     12   // 左电机方向
+#define PIN_IN2     13
+#define PIN_IN3     7    // 右电机方向
+#define PIN_IN4     6
+#define PIN_PWMA    10   // 左电机 PWM
+#define PIN_PWMB    9    // 右电机 PWM
+#define PIN_ENC_L_A 2    // INT0
+#define PIN_ENC_L_B 5
+#define PIN_ENC_R_A 4    // PCINT20
+#define PIN_ENC_R_B 8
+#define PIN_VBAT    A0
 
-// ---- 调参初值（朋友项目实测，本车微调）----
-constexpr float TARGET_ANGLE   = -2.3f;   // 机械中值，本车需重测
-constexpr float BALANCE_KP     = 15.0f;   // 直立环 PD
-constexpr float BALANCE_KD     = 0.4f;
-constexpr float VELOCITY_KP    = 2.0f;    // 速度环 PI
-constexpr float VELOCITY_KI    = 0.01f;
-constexpr int   PWM_LIMIT      = 250;     // PWM 限幅
-constexpr float ANGLE_PROTECT  = 40.0f;   // 倾角保护阈值（°）
-constexpr float VBAT_PROTECT   = 10.0f;   // 欠压保护（V）
-constexpr float VBAT_COEFF     = 0.05371f;// A0 均值 → 电压
+// ================= 里程计常量（权威定义：docs/serial-protocol.md） =================
+constexpr float    WHEEL_DIAMETER_MM    = 67.0f;   // ⚠️ 待实测
+constexpr float    WHEEL_TRACK_MM       = 170.0f;  // ⚠️ 待实测
+constexpr uint16_t COUNTS_PER_WHEEL_REV = 660;     // 11 线 × 2 倍频 × 减速比 30
+constexpr float    MM_PER_COUNT = PI * WHEEL_DIAMETER_MM / COUNTS_PER_WHEEL_REV; // ≈0.319
 
-// ---- 控制周期 ----
-constexpr uint8_t  CONTROL_MS     = 5;    // 5ms 控制环（MsTimer2），与朋友项目一致
-constexpr uint16_t TELEMETRY_HZ   = 50;   // 串口遥测（每 10 个控制周期）
-constexpr uint16_t CMD_TIMEOUT_MS = 500;  // 超时未收到指令 → 目标速度清零
+// ================= 控制参数（初值来自基线项目，本车微调） =================
+constexpr float TARGET_ANGLE  = -2.3f;  // 机械中值 ⚠️ 本车需重测
+constexpr float BALANCE_KP    = 15.0f;
+constexpr float BALANCE_KD    = 0.4f;
+constexpr float VELOCITY_KP   = 2.0f;
+constexpr float VELOCITY_KI   = 0.01f;
+constexpr float TURN_KP       = 2.0f;   // 转向环 ⚠️ 待调（基线为空函数）
+constexpr float TURN_KD       = 0.1f;
+constexpr int   PWM_LIMIT     = 250;
+constexpr float ANGLE_PROTECT = 40.0f;  // 倾角保护（°）
+constexpr float VBAT_PROTECT  = 10.0f;  // 欠压保护（V）
+constexpr float VBAT_COEFF    = 0.05371f;
 
+// 卡尔曼参数（基线实测）
+constexpr float K_DT = 0.005f, K_Q_ANGLE = 0.001f, K_Q_GYRO = 0.005f;
+constexpr float K_R_ANGLE = 0.5f, K_C0 = 1.0f, K_K1 = 0.05f;
+
+// cmd_vel（mm/s）→ 速度环 Movement（双轮 counts / 40ms）
+// counts/s 每轮 = v / MM_PER_COUNT；40ms 双轮 = v / MM_PER_COUNT * 0.04 * 2
+constexpr float MMS_TO_MOVEMENT = 0.08f / MM_PER_COUNT;
+
+// ================= 串口协议（docs/serial-protocol.md v1.0） =================
+constexpr uint8_t FRAME_H0 = 0xAA, FRAME_H1 = 0x55;
+constexpr uint8_t TYPE_TELEMETRY = 0x01;  // 上行，载荷 28 字节
+constexpr uint8_t TYPE_CMD_VEL   = 0x10;  // 下行，载荷 4 字节
+constexpr uint16_t CMD_TIMEOUT_MS = 500;
+
+struct __attribute__((packed)) Telemetry {
+  int16_t  d_enc_l, d_enc_r;      // 编码器增量（自上帧）
+  int16_t  speed_l, speed_r;      // mm/s
+  int16_t  roll, pitch, yaw;      // 0.01°
+  int16_t  gyro_x, gyro_y, gyro_z;// 0.1°/s
+  int16_t  acc_x, acc_y, acc_z;   // 0.001g
+  uint16_t vbat_mv;
+};
+static_assert(sizeof(Telemetry) == 28, "telemetry payload must be 28 bytes");
+
+// ================= 全局状态 =================
+KalmanFilter kal;
+int16_t ax, ay, az, gx, gy, gz;
+int Balance_Pwm, Velocity_Pwm, Turn_Pwm;
+int Motor1, Motor2;
+float Battery_Voltage = 12.0f;      // 初值防止开机误触发欠压保护
+float yaw_deg = 0;                  // 陀螺积分航向（漂移，仅供参考）
+unsigned char Flag_Stop = 1;
+
+// 编码器：Velocity_* 供速度环（40ms 清零），Odom_* 供遥测（每帧清零）
+volatile int16_t Velocity_L, Velocity_R;
+volatile int16_t Odom_L, Odom_R;
+int16_t Velocity_Left, Velocity_Right;  // 速度环采样值
+
+// cmd_vel 目标（loop 写入，控制 ISR 读取；16 位访问需关中断保护）
+volatile int16_t target_v_mms = 0;      // mm/s
+volatile int16_t target_w_mrads = 0;    // 0.001 rad/s
+volatile uint32_t last_cmd_ms = 0;
+
+volatile uint8_t telemetry_due = 0;     // 控制 ISR 置位，loop 发送
+
+// ================= 编码器中断 =================
+// 2 倍频：A 相 CHANGE 触发，A^B 判向。直读端口寄存器（ISR 内避免 digitalRead 开销）
+void readEncoderL() {
+  bool a = PIND & _BV(PD2), b = PIND & _BV(PD5);
+  if (a ^ b) { Velocity_L++; Odom_L++; } else { Velocity_L--; Odom_L--; }
+}
+ISR(PCINT2_vect) {  // D4 = PCINT20（PCMSK2 只使能该位）
+  bool a = PIND & _BV(PD4), b = PINB & _BV(PB0);   // D8 = PB0
+  // 右电机镜像安装，计数取反使前进方向两轮同号 ⚠️ 装车后验证
+  if (a ^ b) { Velocity_R--; Odom_R--; } else { Velocity_R++; Odom_R++; }
+}
+
+// ================= MPU6050（Wire 直读，无库依赖） =================
+static void mpuWrite(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(0x68); Wire.write(reg); Wire.write(val); Wire.endTransmission();
+}
+static void mpuInit() {
+  mpuWrite(0x6B, 0x00);  delay(50);  // 唤醒
+  mpuWrite(0x1B, 0x00);  delay(10);  // 陀螺 ±250°/s（131 LSB/(°/s)）
+  mpuWrite(0x1C, 0x00);  delay(10);  // 加计 ±2g（16384 LSB/g）
+  mpuWrite(0x1A, 0x03);              // DLPF 44Hz，抑制电机振动噪声
+}
+static void mpuRead() {
+  Wire.beginTransmission(0x68); Wire.write(0x3B); Wire.endTransmission(false);
+  Wire.requestFrom(0x68, 14);
+  ax = Wire.read() << 8 | Wire.read();
+  ay = Wire.read() << 8 | Wire.read();
+  az = Wire.read() << 8 | Wire.read();
+  Wire.read(); Wire.read();          // 跳过温度
+  gx = Wire.read() << 8 | Wire.read();
+  gy = Wire.read() << 8 | Wire.read();
+  gz = Wire.read() << 8 | Wire.read();
+}
+
+// ================= 控制律（结构沿用基线） =================
+static int balance(float angle, float gyro) {
+  return BALANCE_KP * angle + BALANCE_KD * gyro;
+}
+
+static int velocity(int enc_left, int enc_right, float movement) {
+  static float Encoder, Encoder_Integral;
+  float least = (enc_left + enc_right) - 0;
+  Encoder = Encoder * 0.7f + least * 0.3f;         // 低通
+  Encoder_Integral += Encoder;
+  Encoder_Integral -= movement;                    // 目标速度以积分偏置注入
+  if (Encoder_Integral >  21000) Encoder_Integral =  21000;
+  if (Encoder_Integral < -21000) Encoder_Integral = -21000;
+  float out = Encoder * VELOCITY_KP + Encoder_Integral * VELOCITY_KI;
+  if (Flag_Stop) Encoder_Integral = 0;
+  return out;
+}
+
+static int turn(float target_w_dps, float gyro_z_dps) {
+  // 前馈 + 角速度反馈 PD（基线为空函数，此为新增）
+  return TURN_KP * target_w_dps + TURN_KD * (target_w_dps - gyro_z_dps) * 10.0f;
+}
+
+static void setPwm(int moto1, int moto2) {  // 极性沿用基线（电机镜像安装）
+  if (moto1 > 0) { digitalWrite(PIN_IN1, HIGH); digitalWrite(PIN_IN2, LOW); }
+  else           { digitalWrite(PIN_IN1, LOW);  digitalWrite(PIN_IN2, HIGH); }
+  analogWrite(PIN_PWMA, abs(moto1));
+  if (moto2 < 0) { digitalWrite(PIN_IN3, HIGH); digitalWrite(PIN_IN4, LOW); }
+  else           { digitalWrite(PIN_IN3, LOW);  digitalWrite(PIN_IN4, HIGH); }
+  analogWrite(PIN_PWMB, abs(moto2));
+}
+
+static bool turnOff(float angle, float voltage) {
+  if (angle < -ANGLE_PROTECT || angle > ANGLE_PROTECT || Flag_Stop || voltage < VBAT_PROTECT) {
+    analogWrite(PIN_PWMA, 0); analogWrite(PIN_PWMB, 0);
+    return true;
+  }
+  return false;
+}
+
+// 拿起/放下检测（移植自基线）
+static int pickUp(float acc_z, float angle, int enc_l, int enc_r) {
+  static unsigned int flag, c0, c1, c2;
+  if (flag == 0) {
+    if (abs(enc_l) + abs(enc_r) < 15) c0++; else c0 = 0;
+    if (c0 > 10) { flag = 1; c0 = 0; }
+  }
+  if (flag == 1) {
+    if (++c1 > 400) { c1 = 0; flag = 0; }
+    if (acc_z > 27000 && angle > (-14 + TARGET_ANGLE) && angle < (14 + TARGET_ANGLE)) flag = 2;
+  }
+  if (flag == 2) {
+    if (++c2 > 200) { c2 = 0; flag = 0; }
+    if (abs(enc_l + enc_r) > 300) { flag = 0; return 1; }
+  }
+  return 0;
+}
+static int putDown(float angle, int enc_l, int enc_r) {
+  static unsigned int flag, count;
+  if (!Flag_Stop) return 0;
+  if (flag == 0) {
+    if (angle > (-10 + TARGET_ANGLE) && angle < (10 + TARGET_ANGLE) && enc_l == 0 && enc_r == 0) flag = 1;
+  }
+  if (flag == 1) {
+    if (++count > 100) { count = 0; flag = 0; }
+    if (enc_l > 12 && enc_r > 12 && enc_l < 80 && enc_r < 80) { flag = 0; return 1; }
+  }
+  return 0;
+}
+
+static bool keyClick() {
+  static bool armed = true;
+  bool k = digitalRead(PIN_KEY);
+  if (armed && k == 0) { armed = false; return true; }
+  if (k == 1) armed = true;
+  return false;
+}
+
+// ================= 5ms 控制中断 =================
+void control() {
+  static int velocity_cnt, turn_cnt, telemetry_cnt;
+  static float voltage_sum; static int voltage_cnt;
+  static float movement = 0, target_w_dps = 0;
+
+  sei();  // 允许编码器/串口中断嵌套（I2C 读约 0.5ms @400kHz）
+
+  mpuRead();
+  kal.Angletest(ax, ay, az, gx, gy, gz, K_DT, K_Q_ANGLE, K_Q_GYRO, K_R_ANGLE, K_C0, K_K1);
+  yaw_deg += kal.Gyro_z * K_DT;
+
+  // 指令目标（16 位原子读取 + 超时保护）
+  cli();
+  int16_t tv = target_v_mms, tw = target_w_mrads;
+  uint32_t lc = last_cmd_ms;
+  sei();
+  if (millis() - lc > CMD_TIMEOUT_MS) { tv = 0; tw = 0; }
+  movement = tv * MMS_TO_MOVEMENT;
+  target_w_dps = tw * 0.0573f;  // 0.001 rad/s → °/s
+
+  Balance_Pwm = balance(kal.angle + TARGET_ANGLE, kal.Gyro_x);
+
+  if (++velocity_cnt >= 8) {   // 40ms
+    cli(); Velocity_Left = Velocity_L; Velocity_L = 0;
+           Velocity_Right = Velocity_R; Velocity_R = 0; sei();
+    Velocity_Pwm = velocity(Velocity_Left, Velocity_Right, movement);
+    velocity_cnt = 0;
+  }
+  if (++turn_cnt >= 4) {       // 20ms
+    Turn_Pwm = turn(target_w_dps, kal.Gyro_z);
+    turn_cnt = 0;
+  }
+
+  Motor1 = Balance_Pwm - Velocity_Pwm + Turn_Pwm;
+  Motor2 = Balance_Pwm - Velocity_Pwm - Turn_Pwm;
+  Motor1 = constrain(Motor1, -PWM_LIMIT, PWM_LIMIT);
+  Motor2 = constrain(Motor2, -PWM_LIMIT, PWM_LIMIT);
+
+  if (pickUp(az, kal.angle, Velocity_Left, Velocity_Right)) Flag_Stop = 1;
+  if (putDown(kal.angle, Velocity_Left, Velocity_Right))    Flag_Stop = 0;
+  if (!turnOff(kal.angle, Battery_Voltage)) setPwm(Motor1, Motor2);
+  if (keyClick()) Flag_Stop = !Flag_Stop;
+
+  voltage_sum += analogRead(PIN_VBAT);
+  if (++voltage_cnt >= 200) {
+    Battery_Voltage = voltage_sum * VBAT_COEFF / 200;
+    voltage_sum = 0; voltage_cnt = 0;
+  }
+
+  if (++telemetry_cnt >= 4) {  // 20ms → 50Hz
+    telemetry_due = 1;
+    telemetry_cnt = 0;
+  }
+}
+
+// ================= 遥测发送（loop 上下文） =================
+static void sendTelemetry() {
+  Telemetry t;
+  cli();
+  t.d_enc_l = Odom_L; Odom_L = 0;
+  t.d_enc_r = Odom_R; Odom_R = 0;
+  sei();
+  // 50Hz 帧周期 20ms：speed = delta * MM_PER_COUNT / 0.02
+  t.speed_l = t.d_enc_l * MM_PER_COUNT * 50.0f;
+  t.speed_r = t.d_enc_r * MM_PER_COUNT * 50.0f;
+  t.roll  = kal.angle6 * 100;             // 一阶滤波的另一轴倾角，仅参考
+  t.pitch = kal.angle * 100;
+  t.yaw   = yaw_deg * 100;
+  t.gyro_x = (int32_t)gx * 10 / 131;      // raw → 0.1°/s
+  t.gyro_y = (int32_t)gy * 10 / 131;
+  t.gyro_z = (int32_t)gz * 10 / 131;
+  t.acc_x = (int32_t)ax * 1000 / 16384;   // raw → 0.001g
+  t.acc_y = (int32_t)ay * 1000 / 16384;
+  t.acc_z = (int32_t)az * 1000 / 16384;
+  t.vbat_mv = Battery_Voltage * 1000;
+
+  uint8_t buf[5 + sizeof(Telemetry)];
+  buf[0] = FRAME_H0; buf[1] = FRAME_H1;
+  buf[2] = TYPE_TELEMETRY; buf[3] = sizeof(Telemetry);
+  memcpy(buf + 4, &t, sizeof(Telemetry));   // AVR 小端，直接拷贝
+  uint8_t sum = 0;
+  for (uint8_t i = 2; i < 4 + sizeof(Telemetry); i++) sum += buf[i];
+  buf[4 + sizeof(Telemetry)] = sum;
+  Serial.write(buf, sizeof(buf));
+}
+
+// ================= 下行帧解析（loop 上下文，状态机） =================
+static void pollCommand() {
+  static uint8_t state, type, len, idx, sum;
+  static uint8_t payload[8];
+  while (Serial.available()) {
+    uint8_t c = Serial.read();
+    switch (state) {
+      case 0: state = (c == FRAME_H0) ? 1 : 0; break;
+      case 1: state = (c == FRAME_H1) ? 2 : 0; break;
+      case 2: type = c; sum = c; state = 3; break;
+      case 3:
+        len = c; sum += c; idx = 0;
+        state = (type == TYPE_CMD_VEL && len == 4) ? 4 : 0;
+        break;
+      case 4:
+        payload[idx++] = c; sum += c;
+        if (idx >= len) state = 5;
+        break;
+      case 5:
+        if (c == sum) {
+          int16_t v = payload[0] | (payload[1] << 8);
+          int16_t w = payload[2] | (payload[3] << 8);
+          cli();
+          target_v_mms = v; target_w_mrads = w;
+          last_cmd_ms = millis();
+          sei();
+        }
+        state = 0;
+        break;
+    }
+  }
+}
+
+// ================= 初始化与主循环 =================
 void setup() {
-  Serial.begin(115200);  // 协议波特率（不沿用朋友的 9600 调试口）
-  // TODO(阶段1): 初始化引脚、I2C、MPU6050（参考朋友项目：手动写寄存器 0x6B/0x1B/0x1C，
-  //              不用 initialize()）；D2 attachInterrupt + D4 PinChangeInt 双编码器
-  // TODO(阶段1): 卡尔曼参数沿用朋友项目：dt=0.005 Q_angle=0.001 Q_gyro=0.005 R_angle=0.5
+  pinMode(PIN_IN1, OUTPUT); pinMode(PIN_IN2, OUTPUT);
+  pinMode(PIN_IN3, OUTPUT); pinMode(PIN_IN4, OUTPUT);
+  pinMode(PIN_PWMA, OUTPUT); pinMode(PIN_PWMB, OUTPUT);
+  setPwm(0, 0);
+  pinMode(PIN_ENC_L_A, INPUT); pinMode(PIN_ENC_L_B, INPUT);
+  pinMode(PIN_ENC_R_A, INPUT); pinMode(PIN_ENC_R_B, INPUT);
+  pinMode(PIN_KEY, INPUT);
+
+  Serial.begin(115200);
+
+  Wire.begin();
+  Wire.setClock(400000L);  // 无 I2C 从机，可用 400kHz（基线因 ESP32 从机限 100k）
+  mpuInit();
+
+  attachInterrupt(digitalPinToInterrupt(PIN_ENC_L_A), readEncoderL, CHANGE);
+  PCICR  |= _BV(PCIE2);     // 使能端口 D 的 PCINT 组
+  PCMSK2 |= _BV(PCINT20);   // 仅 D4
+
+  MsTimer2::set(5, control);
+  MsTimer2::start();
+
+#if DEBUG_PRINT
+  Serial.println(F("\n=== Balance Car (Phase 1) READY, DEBUG mode ==="));
+#endif
 }
 
 void loop() {
-  // TODO(阶段1): MsTimer2 5ms 定时执行串级控制（结构沿用朋友项目 control()）：
-  //   1. MPU6050 读取 + 卡尔曼滤波 → angle / gyro
-  //   2. 直立环 PD（5ms）：angle+TARGET_ANGLE、gyro → Balance_Pwm
-  //   3. 速度环 PI（40ms）：双轮编码器均速 vs 目标 v → Velocity_Pwm（低通 0.7/0.3 + 积分限幅）
-  //   4. 转向环（20ms）：gyro_z vs 目标 ω → Turn_Pwm（朋友项目为空，需要实现）
-  //   5. Motor = Balance − Velocity ± Turn，限幅 ±PWM_LIMIT，倾角/欠压保护后输出
-  //   6. 拿起/放下检测（Pick_Up/Put_Down 逻辑可直接移植）
-  // TODO(阶段1): 50Hz 组遥测帧上报；解析下行 cmd_vel 帧（带 CMD_TIMEOUT_MS 保护）
-  //              联调时关闭所有调试打印（与协议共用串口）
+  pollCommand();
+  if (telemetry_due) {
+    telemetry_due = 0;
+#if DEBUG_PRINT
+    static uint8_t n;
+    if (++n >= 10) {  // 5Hz 人类可读输出
+      n = 0;
+      Serial.print(F("Ang:"));  Serial.print(kal.angle);
+      Serial.print(F(" VL:"));  Serial.print(Velocity_Left);
+      Serial.print(F(" VR:"));  Serial.print(Velocity_Right);
+      Serial.print(F(" Bat:")); Serial.print(Battery_Voltage);
+      Serial.print(F(" PWM:")); Serial.print(Motor1);
+      Serial.print(F(","));     Serial.print(Motor2);
+      Serial.print(F(" Stop:"));Serial.println(Flag_Stop);
+    }
+#else
+    sendTelemetry();
+#endif
+  }
 }
