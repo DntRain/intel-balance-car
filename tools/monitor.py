@@ -88,7 +88,8 @@ def main():
                     (dl, dr, sl, sr, roll, pitch, yaw,
                      gx, gy, gz, ax, ay, az, vbat) = f
                     rate = n_frames / (now - n_start)
-                    print(f"[{rate:5.1f}Hz] dEnc L/R {dl:+4d}/{dr:+4d}  "
+                    state = "停" if roll else "行"  # roll 字段临时复用为 Flag_Stop
+                    print(f"[{rate:5.1f}Hz|{state}] dEnc L/R {dl:+4d}/{dr:+4d}  "
                           f"v L/R {sl:+5d}/{sr:+5d}mm/s  "
                           f"pitch {pitch/100:+6.2f}°  yaw {yaw/100:+7.2f}°  "
                           f"gz {gz/10:+6.1f}°/s  bat {vbat/1000:.2f}V")
