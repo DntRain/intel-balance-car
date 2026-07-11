@@ -39,12 +39,12 @@ constexpr float    MM_PER_COUNT = PI * WHEEL_DIAMETER_MM / COUNTS_PER_WHEEL_REV;
 
 // ================= 控制参数（初值来自基线项目，本车微调） =================
 constexpr float TARGET_ANGLE  = -0.5f;  // 机械中值二分逼近：+1.3 前倒 / -1.2 后倒（2026-07-11）
-// 2026-07-11 实测调参：基线值(15/0.4/2/0.01)是单编码器车的，本车双编码器求和后
-// 速度环反馈翻倍压制直立环（倾 7° 轮速仅 175mm/s 追不回）→ 直立环加力、速度环减半再减
-constexpr float BALANCE_KP    = 16.0f;  // 25 剧抖 / 20 仍抖 → 回到基线附近（速度环已松绑，无需大 KP）
-constexpr float BALANCE_KD    = 0.45f;
-constexpr float VELOCITY_KP   = 0.8f;
-constexpr float VELOCITY_KI   = 0.004f;
+// 回归基线验证值（朋友同款车实测能站）：此前"软倒/狂抖"的真因是速度环缺积分泄放，
+// 不是这些增益；基线单编码器模式=左轮复制右轮再求和，与双编码器求和同尺度，无需减半
+constexpr float BALANCE_KP    = 15.0f;
+constexpr float BALANCE_KD    = 0.4f;
+constexpr float VELOCITY_KP   = 2.0f;
+constexpr float VELOCITY_KI   = 0.01f;
 constexpr float TURN_KP       = 2.0f;   // 转向环 ⚠️ 待调（基线为空函数）
 constexpr float TURN_KD       = 0.1f;
 constexpr int   PWM_LIMIT     = 250;
@@ -117,7 +117,8 @@ static void mpuInit() {
   mpuWrite(0x6B, 0x00);  delay(50);  // 唤醒
   mpuWrite(0x1B, 0x00);  delay(10);  // 陀螺 ±250°/s（131 LSB/(°/s)）
   mpuWrite(0x1C, 0x00);  delay(10);  // 加计 ±2g（16384 LSB/g）
-  mpuWrite(0x1A, 0x03);              // DLPF 44Hz，抑制电机振动噪声
+  // DLPF 保持默认关闭（与基线一致）：0x1A=0x03 的 44Hz 滤波给陀螺加 ~4.8ms 延迟，
+  // 直立环 KD 项晚一整拍，实测削弱阻尼；振动噪声交给卡尔曼滤波处理
 }
 static void mpuRead() {
   Wire.beginTransmission(0x68); Wire.write(0x3B); Wire.endTransmission(false);
@@ -138,6 +139,10 @@ static int balance(float angle, float gyro) {
 
 static int velocity(int enc_left, int enc_right, float movement) {
   static float Encoder, Encoder_Integral;
+  // 积分泄放（基线原码关键两行，初版移植时遗漏）：没有它积分会漂到 ±21000
+  // （±84 PWM 恒定推力）把静止的车慢慢拱倒，方向随漂移历史——"两边都倒"的元凶
+  if (Encoder_Integral >  300) Encoder_Integral -= 200;
+  if (Encoder_Integral < -300) Encoder_Integral += 200;
   float least = (enc_left + enc_right) - 0;
   Encoder = Encoder * 0.7f + least * 0.3f;         // 低通
   Encoder_Integral += Encoder;
@@ -145,7 +150,9 @@ static int velocity(int enc_left, int enc_right, float movement) {
   if (Encoder_Integral >  21000) Encoder_Integral =  21000;
   if (Encoder_Integral < -21000) Encoder_Integral = -21000;
   float out = Encoder * VELOCITY_KP + Encoder_Integral * VELOCITY_KI;
-  if (Flag_Stop) Encoder_Integral = 0;
+  // 与基线一致：停机、倒下、欠压任一条件都清零积分，防止扶起瞬间带残留推力
+  if (Flag_Stop || kal.angle < -ANGLE_PROTECT || kal.angle > ANGLE_PROTECT ||
+      Battery_Voltage < VBAT_PROTECT) Encoder_Integral = 0;
   return out;
 }
 
