@@ -62,13 +62,13 @@ void Print_Params();          // [PATCH P7] setup 中调用，定义在文件尾
 // [PATCH P7] 全部改为运行时变量，可经串口在线调整（见 loop 中的命令解析）。
 // 下面的初值 = 截至 2026-07-11 的实测收敛值，调参历史见 git log。
 // [PATCH P2] 注意符号：平衡角 = -target_angle（基线用 angle+TARGET 求偏差）
-float target_angle = 0.6;   // 命令 a<平衡角> 会自动取负存入；2026-07-11 在线调参收敛：平衡角 -0.6°
+float target_angle = -0.4;  // 命令 a<平衡角> 会自动取负存入；2026-07-12 在线调参：平衡角 +0.4°
 #define DIFFERENCE 2
-float balance_kp  = 35.0;    // 命令 p<值>
+float balance_kp  = 21.0;    // 命令 p<值>
 float balance_kd  = 0.9;     // 命令 d<值>
-float velocity_kp = 1.5;     // 命令 v<值>
-float velocity_ki = 0.0075;  // 命令 i<值>
-int   dead_zone   = 12;      // 命令 z<值>，[PATCH P5] 电机静摩擦死区补偿
+float velocity_kp = 2.5;     // 命令 v<值>，2026-07-12 手推验证：抗拒感明显
+float velocity_ki = 0.0095;  // 命令 i<值>
+int   dead_zone   = 0;       // 命令 z<值>，[PATCH P5] 死区补偿，2026-07-12 调参置 0
 
 // ========== 卡尔曼滤波参数 ==========
 #define K1 0.05
@@ -325,12 +325,12 @@ int turn(float gyro) {
 **************************************************************************/
 // [PATCH P5] 死区补偿：PWM 非零即加偏置跳过电机静摩擦死区，
 // 解决"小角度倾斜时输出落在死区内、轮子不动、白白倾倒"的问题
-#define DEAD_ZONE 12  // 20 时过零跳变引发高频抖，降档
+// 用 dead_zone 变量（串口命令 z 在线可调）；20 时过零跳变引发高频抖
 void Set_Pwm(int moto1, int moto2) {
-  if (moto1 > 0) moto1 += DEAD_ZONE;
-  else if (moto1 < 0) moto1 -= DEAD_ZONE;
-  if (moto2 > 0) moto2 += DEAD_ZONE;
-  else if (moto2 < 0) moto2 -= DEAD_ZONE;
+  if (moto1 > 0) moto1 += dead_zone;
+  else if (moto1 < 0) moto1 -= dead_zone;
+  if (moto2 > 0) moto2 += dead_zone;
+  else if (moto2 < 0) moto2 -= dead_zone;
 
   if (moto1 > 0) digitalWrite(IN1, HIGH), digitalWrite(IN2, LOW);
   else digitalWrite(IN1, LOW), digitalWrite(IN2, HIGH);
