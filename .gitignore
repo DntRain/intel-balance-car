@@ -2,6 +2,10 @@
 firmware/**/.pio/
 firmware/**/.vscode/
 
+# 本地 VS Code 工作区配置
+.vscode/
+esp32/ld03_microros_bridge/.vscode/
+
 # ROS2 / colcon（工作空间构建产物，仅 src/ 入库）
 ros2_ws/build/
 ros2_ws/install/
