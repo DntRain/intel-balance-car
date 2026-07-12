@@ -1,5 +1,7 @@
 # ESP32-S3 交互层（esp-claw）
 
+> LD03 雷达使用的是另一块原有 ESP32 转接板，固件位于 [`ld03_microros_bridge/`](ld03_microros_bridge/)，不属于 ESP-Claw 交互层。
+
 阶段 4 实现。基于乐鑫官方 [esp-claw](https://github.com/espressif/esp-claw)。
 
 ## 硬件要求（esp-claw 硬性要求）

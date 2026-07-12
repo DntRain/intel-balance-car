@@ -11,9 +11,15 @@
 
   <exec_depend>balance_chassis_driver</exec_depend>
   <exec_depend>balance_bot_description</exec_depend>
+  <exec_depend>ld03_lidar</exec_depend>
   <exec_depend>robot_localization</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>rf2o_laser_odometry</exec_depend>
+  <exec_depend>mipi_cam</exec_depend>
+  <exec_depend>hobot_codec</exec_depend>
+  <exec_depend>hobot_shm</exec_depend>
+  <exec_depend>websocket</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

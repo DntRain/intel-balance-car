@@ -1,28 +1,50 @@
 <?xml version="1.0"?>
 <!-- 平衡车 URDF 骨架 - 阶段 2 按 3D 建模实际尺寸补全
-     TF 树: base_link -> laser / imu_link / camera_link
+     TF 树: base_link -> laser_link / imu_link / camera_link
      尺寸常量与 docs/serial-protocol.md 常量表保持一致 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="balance_bot">
 
   <xacro:property name="wheel_diameter" value="0.067"/> <!-- m, 待实测 -->
   <xacro:property name="wheel_track"    value="0.170"/> <!-- m, 待实测 -->
+  <!-- 传感器安装后通过 launch 参数覆盖；默认值仅用于先验证 TF 拓扑。 -->
+  <xacro:arg name="laser_x" default="0"/>
+  <xacro:arg name="laser_y" default="0"/>
+  <xacro:arg name="laser_z" default="0.20"/>
+  <xacro:arg name="laser_roll" default="0"/>
+  <xacro:arg name="laser_pitch" default="0"/>
+  <xacro:arg name="laser_yaw" default="0"/>
+  <xacro:arg name="camera_x" default="0"/>
+  <xacro:arg name="camera_y" default="0"/>
+  <xacro:arg name="camera_z" default="0.20"/>
+  <xacro:arg name="camera_roll" default="0"/>
+  <xacro:arg name="camera_pitch" default="0"/>
+  <xacro:arg name="camera_yaw" default="0"/>
 
   <link name="base_link">
     <!-- TODO(阶段2): 车体外形（可用简单 box 近似） -->
   </link>
 
-  <link name="laser"/>
+  <link name="laser_link"/>
   <joint name="laser_joint" type="fixed">
     <parent link="base_link"/>
-    <child link="laser"/>
-    <origin xyz="0 0 0.20" rpy="0 0 0"/> <!-- TODO: 按雷达实际安装位置 -->
+    <child link="laser_link"/>
+    <origin xyz="$(arg laser_x) $(arg laser_y) $(arg laser_z)"
+            rpy="$(arg laser_roll) $(arg laser_pitch) $(arg laser_yaw)"/>
+  </joint>
+
+  <link name="camera_link"/>
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <origin xyz="$(arg camera_x) $(arg camera_y) $(arg camera_z)"
+            rpy="$(arg camera_roll) $(arg camera_pitch) $(arg camera_yaw)"/>
   </joint>
 
   <link name="imu_link"/>
   <joint name="imu_joint" type="fixed">
     <parent link="base_link"/>
     <child link="imu_link"/>
-    <origin xyz="0 0 0.05" rpy="0 0 0"/> <!-- TODO: 按 MPU6050 实际安装位置/方向 -->
+    <origin xyz="0 0 0.05" rpy="0 0 0"/> <!-- 按 MPU6050 实际安装位置/方向调整 -->
   </joint>
 
 </robot>
