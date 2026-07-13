@@ -20,6 +20,7 @@ UNO（待完成） --UART--> 底盘驱动 --/odom_raw、/imu/data_raw、/cmd_vel
 - `/scan`、`/image_raw`、传感器静态 TF。
 - RF2O 手持激光里程计。
 - `slam_toolbox` 手持建图、标准地图保存。
+- 手持建图与 AMCL 已完成链路验证；RF2O 和 `handheld_room` 地图仅供验证，不进入最终验收。后续改由装车后的双编码器、IMU 和 EKF 进行真实建图与导航。
 - 地图加载与 AMCL 手持重新定位。
 
 ## 已放弃的主路线

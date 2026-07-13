@@ -39,7 +39,7 @@
 
 1. 阅读 [`docs/roadmap.md`](docs/roadmap.md) 了解七阶段计划与验收标准
 2. 阶段 1 从 `firmware/balance-car/` 开始：PlatformIO 编译烧录到 UNO
-3. RDK X5 侧：把 `ros2_ws/` 拷到板上 `colcon build`（板载 Ubuntu 22.04 + ROS2 Humble）
+3. RDK X5 侧：若交接到已烧录的 TF 卡，无需重装系统；同步 `ros2_ws/` 后 `colcon build`。重刷系统时再按传感器交接文档恢复 Ubuntu 22.04 + ROS2 Humble 环境。
 4. 接手已验证的 RDK X5 雷达、相机、手持建图与定位链路：阅读 [`docs/rdk-x5-sensor-stack.md`](docs/rdk-x5-sensor-stack.md)
 
 ## 技术栈
