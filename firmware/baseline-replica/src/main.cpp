@@ -62,13 +62,16 @@ void Print_Params();          // [PATCH P7] setup 中调用，定义在文件尾
 // [PATCH P7] 全部改为运行时变量，可经串口在线调整（见 loop 中的命令解析）。
 // 下面的初值 = 截至 2026-07-11 的实测收敛值，调参历史见 git log。
 // [PATCH P2] 注意符号：平衡角 = -target_angle（基线用 angle+TARGET 求偏差）
-float target_angle = -0.4;  // 命令 a<平衡角> 会自动取负存入；2026-07-12 在线调参：平衡角 +0.4°
+float target_angle = -0.2;   // 命令 a<平衡角> 会自动取负存入；07-13 换板后实测：平衡角 +0.2°
 #define DIFFERENCE 2
-float balance_kp  = 21.0;    // 命令 p<值>
-float balance_kd  = 0.9;     // 命令 d<值>
-float velocity_kp = 2.5;     // 命令 v<值>，2026-07-12 手推验证：抗拒感明显
-float velocity_ki = 0.0095;  // 命令 i<值>
-int   dead_zone   = 0;       // 命令 z<值>，[PATCH P5] 死区补偿，2026-07-12 调参置 0
+// 2026-07-13 换板后实测收敛值（老板子 07-11 那组不再适用）：
+// VKP 为负：新板编码器接线相位与老板子相反，前进计数方向反转，正号会定速跑飞
+// DZ 为 0：本板加任何死区补偿都引发高频振荡（与编码器反相互激有关，见 git log）
+float balance_kp  = 24;    // 命令 p<值>
+float balance_kd  = 1;     // 命令 d<值>
+float velocity_kp = -1.8;     // 命令 v<值>
+float velocity_ki = 0.0090;  // 命令 i<值>
+int   dead_zone   = 0;      // 命令 z<值>，[PATCH P5] 死区补偿
 
 // ========== 卡尔曼滤波参数 ==========
 #define K1 0.05
@@ -110,12 +113,16 @@ KalmanFilter KalFilter;
 // ========== 全局变量 ==========
 int16_t ax, ay, az, gx, gy, gz;
 int Balance_Pwm, Velocity_Pwm, Turn_Pwm;
+// [PATCH P10] 运动测试接口：串口 m/t/s 命令写入，停机自动清零
+float move_target = 0;   // 前后目标速度（编码器计数/40ms，正负方向实测定）
+int   turn_bias   = 0;   // 转向差速 PWM（Motor1 +bias / Motor2 -bias）
 int Motor1, Motor2;
 float Battery_Voltage;
 volatile long Velocity_L = 0, Velocity_R = 0;
 int Velocity_Left = 0, Velocity_Right = 0;
 int Angle;
 unsigned char Flag_Stop = 1;
+float Encoder_Integral = 0;               // [PATCH P9] 提为全局以便遥测观测速度环积分
 
 // I2C通信变量
 I2C_Data_Packet i2c_packet;
@@ -261,14 +268,14 @@ unsigned char Turn_Off(float angle, float voltage) {
 unsigned char My_click(void) {
   static unsigned char flag_key = 1;
   unsigned char Key;
-  
+
   Key = digitalRead(KEY);
   if (flag_key && Key == 0) {
     flag_key = 0;
     return 1;
   }
   else if (1 == Key) flag_key = 1;
-  
+
   return 0;
 }
 
@@ -290,26 +297,29 @@ int balance(float Angle, float Gyro) {
 **************************************************************************/
 int velocity(int encoder_left, int encoder_right) {
   static float Velocity, Encoder_Least, Encoder, Movement;
-  static float Encoder_Integral, Target_Velocity;
+  static float Target_Velocity;  // [PATCH P9] Encoder_Integral 移至全局
   
-  Movement = 0;
+  // [PATCH P10] 运动目标走比例路径（积分被 ±300 泄放钉死，走积分推不动车）
+  Movement = move_target;
   if (Encoder_Integral > 300) Encoder_Integral -= 200;
   if (Encoder_Integral < -300) Encoder_Integral += 200;
-  
-  Encoder_Least = (encoder_left + encoder_right) - 0;
+
+  Encoder_Least = (encoder_left + encoder_right) - Movement;
   Encoder *= 0.7;
   Encoder += Encoder_Least * 0.3;
   Encoder_Integral += Encoder;
-  Encoder_Integral = Encoder_Integral - Movement;
   
   if (Encoder_Integral > 21000) Encoder_Integral = 21000;
   if (Encoder_Integral < -21000) Encoder_Integral = -21000;
   
   Velocity = Encoder * velocity_kp + Encoder_Integral * velocity_ki;
   
-  if (Turn_Off(KalFilter.angle, Battery_Voltage) == 1 || Flag_Stop == 1) 
+  if (Turn_Off(KalFilter.angle, Battery_Voltage) == 1 || Flag_Stop == 1) {
     Encoder_Integral = 0;
-  
+    move_target = 0;   // [PATCH P10] 停机/倒下清运动目标，防重启动瞬间带速冲出
+    turn_bias   = 0;
+  }
+
   return Velocity;
 }
 
@@ -317,7 +327,7 @@ int velocity(int encoder_left, int encoder_right) {
 函数功能：转向控制
 **************************************************************************/
 int turn(float gyro) {
-  return 0;
+  return turn_bias;   // [PATCH P10] 开环差速转向，串口 t 命令设置
 }
 
 /**************************************************************************
@@ -558,6 +568,11 @@ void setup() {
   z<值>  死区补偿 PWM     例 z12
   ?      打印当前全部参数
   g      启动电机（Flag_Stop=0）   x  停止电机（Flag_Stop=1）
+[PATCH P10] 运动命令：
+  m<值>  前后移动目标速度（计数/40ms），m20 / m-20，方向实测定，m0 停
+  t<值>  转向差速 PWM，t40 / t-40，t0 回正
+  s      运动全停（move/turn 清零，继续原地平衡）
+  停机或倒下时运动目标自动清零，需先 g 再 m/t
 参数被 5ms 定时中断读取，写入时短暂关中断防止 float 撕裂。
 **************************************************************************/
 void Print_Params() {
@@ -567,6 +582,8 @@ void Print_Params() {
   Serial.print(" VKI=");         Serial.print(velocity_ki, 4);
   Serial.print(" BAL_ANG=");     Serial.print(-target_angle);
   Serial.print(" DZ=");          Serial.print(dead_zone);
+  Serial.print(" MOV=");         Serial.print(move_target);
+  Serial.print(" TRN=");         Serial.print(turn_bias);
   Serial.print(" Stop=");        Serial.println(Flag_Stop);
 }
 
@@ -598,6 +615,9 @@ void Handle_Command() {
       case 'z': dead_zone    = (int)val; break;
       case 'g': Flag_Stop = 0; break;
       case 'x': Flag_Stop = 1; break;
+      case 'm': move_target = val;      break;  // [PATCH P10] 前后移动
+      case 't': turn_bias   = (int)val; break;  // [PATCH P10] 转向差速
+      case 's': move_target = 0; turn_bias = 0; break;  // [PATCH P10] 停运动（保持平衡）
       case '?': break;
       default:  ok = false; break;
     }
@@ -620,7 +640,9 @@ void loop() {
   // 每200ms输出一次状态
   if (currentTime - lastTime >= 200) {
     Serial.print("Ang:");
-    Serial.print(Angle);
+    Serial.print(KalFilter.angle, 1);  // [PATCH P9] 一位小数，可见亚度级偏斜
+    Serial.print(" Int:");
+    Serial.print((int)Encoder_Integral);  // [PATCH P9] 速度环积分观测
     Serial.print(" VL:");
     Serial.print(Velocity_Left);
     Serial.print(" VR:");
